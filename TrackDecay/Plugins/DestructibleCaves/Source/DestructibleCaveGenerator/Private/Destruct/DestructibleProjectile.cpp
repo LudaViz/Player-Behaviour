@@ -50,9 +50,17 @@ ADestructibleProjectile::ADestructibleProjectile(const FObjectInitializer& Objec
 
 void ADestructibleProjectile::InitializeProjectile(bool bUseVisualMesh, bool bEnableOverlap, float InInitialSpeed, float InLifeSpan, float InCollisionRadius)
 {
+	// 1. PROVE THE CODE IS RUNNING
+	if (GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Red, FString::Printf(TEXT("INIT FIRED! Radius: %f | Life: %f"), InCollisionRadius, InLifeSpan));
+	}
+
 	if (VisualMesh)
 	{
 		VisualMesh->SetVisibility(bUseVisualMesh);
+		// Scale the visual ball so you can see if the size actually changed!
+		VisualMesh->SetRelativeScale3D(FVector(InCollisionRadius / 50.0f));
 	}
 
 	if (Collision)
@@ -61,12 +69,21 @@ void ADestructibleProjectile::InitializeProjectile(bool bUseVisualMesh, bool bEn
 		Collision->SetSphereRadius(InCollisionRadius);
 	}
 
+	if (DestructComponent)
+	{
+		// Force the hole size
+		DestructComponent->DestructShape.Radius = InCollisionRadius;
+		DestructComponent->DestructShape.ShapeType = ETerrainDestructShapeType::Sphere;
+	}
+
 	if (ProjectileMovement)
 	{
 		ProjectileMovement->InitialSpeed = InInitialSpeed;
 		ProjectileMovement->MaxSpeed = InInitialSpeed;
 	}
 
+	// 2. FIX THE BEGINPLAY OVERWRITE
+	LifeSpanSeconds = InLifeSpan;
 	SetLifeSpan(InLifeSpan);
 }
 
@@ -82,6 +99,9 @@ void ADestructibleProjectile::Tick(float DeltaTime)
 	Super::Tick(DeltaTime);
 	if (DestructComponent && !DestroyOnOverlap)
 	{
+		// AUTOMATIC SCALING: Sync the hole size to the collision sphere's current scale
+		DestructComponent->DestructShape.Radius = Collision->GetScaledSphereRadius();
+
 		if (DestructComponent->ApplyDestruction())
 		{
 			//if (DestroyOnOverlap)Destroy();
@@ -95,7 +115,11 @@ void ADestructibleProjectile::OnProjectileOverlap(UPrimitiveComponent* Overlappe
 {
 	if (DestructComponent && DestroyOnOverlap)
 	{
+		// AUTOMATIC SCALING: Sync the hole size to the collision sphere's current scale
+		DestructComponent->DestructShape.Radius = Collision->GetScaledSphereRadius();
+		DestructComponent->DestructShape.ShapeType = ETerrainDestructShapeType::Sphere;
+
 		DestructComponent->ApplyDestruction();
 	}
-	if (DestroyOnOverlap)Destroy();
+	if (DestroyOnOverlap) Destroy();
 }
