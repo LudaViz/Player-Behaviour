@@ -27,6 +27,14 @@
 			"Name": "DestructibleCaveGenerator",
 			"Enabled": true,
 			"MarketplaceURL": "com.epicgames.launcher://ue/Fab/product/7c8ec064-1270-4edd-844e-082f5ba9201d"
+		},
+		{
+			"Name": "MotionWarping",
+			"Enabled": true
+		},
+		{
+			"Name": "ContextualAnimation",
+			"Enabled": true
 		}
 	]
 }
