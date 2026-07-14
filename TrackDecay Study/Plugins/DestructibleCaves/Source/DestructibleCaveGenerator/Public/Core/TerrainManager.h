@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "Core/ChunkManager.h"
 #include "Core/NoiseGenerator.h"
 #include "Scheduler/TimeBudgetSystem.h"
 #include "Engine/DataTable.h"
@@ -63,6 +64,12 @@ public:
 	/** Mapping of material type to pooled NiagaraComponents for FX reuse */
 	UPROPERTY()
 	TMap<uint8, UNiagaraComponent*> NiagaraEmitters;
+
+	// Allows the actor to tick in the editor viewport to process async chunk queues
+	virtual bool ShouldTickIfViewportsOnly() const override;
+
+	/** Timer used to prevent editor freezing when dragging sliders in the DataTable */
+	float RegenerationCooldownTimer = 0.0f;
 
 	/*// 머티리얼 타입별 파괴 위치 큐
 	TMap<uint8, TArray<FVector>> MaterialDestructionPositions;*/
@@ -150,6 +157,20 @@ protected:
 	virtual void Tick(float DeltaTime) override;
 	virtual void PostInitializeComponents()override;
 
+	virtual void OnConstruction(const FTransform& Transform) override;
+	virtual void Destroyed() override;
+
+#if WITH_EDITOR
+	// Fires automatically whenever any value is tweaked in the actor's details panel
+	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+	
+	// Listens to global asset modifications (like the DataTable)
+	void OnObjectModified(UObject* Object);
+
+	// Handle for safe memory cleanup
+	FDelegateHandle OnObjectModifiedHandle;
+#endif
+
 private:
 	
 	// === 청크 재생성 관련 ===
@@ -183,7 +204,48 @@ public:
 	int32 TerrainDataCount;
 	TArray<FTerrainData*> TerrainDatas;
 
+	/** If true, editing properties or changing the seed below will instantly update the viewport */
+	UPROPERTY(EditAnywhere, Category = "Terrain Options")
+	bool bLiveEditorPreview = false;
+
+	/** Helper to execute clean editor-side reconstruction */
+	void ForceEditorRegeneration();
+
 public:
 	UMaterialInterface* GetMaterial(uint8 Type) const;
 	uint8 GetNumMaterials() const;
+
+	/** Synchronizes root settings down to the ChunkManager component */
+	void SyncSettingsToChunkManager();
+
+	// --- Terrain Settings ---
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain Settings|Generation")
+	float VoxelSize = 32.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain Settings|Generation")
+	float BoundsScale = 5.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain Settings|Streaming")
+	int32 RenderDistance = 3;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain Settings|Streaming")
+	bool bUpdateStreaming = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain Settings|Streaming")
+	bool bInitialChunkLoad = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain Settings|Streaming")
+	int32 InitialChunkLoadNum = 0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain Settings|Pool")
+	int32 InitialPoolSize = 128;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain Settings|Performance")
+	EChunkLoadMode ChunkLoadMode = EChunkLoadMode::ScheduledTask;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain Settings|Performance")
+	int32 NumThreads = 4;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Terrain Settings|Performance")
+	int32 NumMeshGeneratePerTick = 4;
 };

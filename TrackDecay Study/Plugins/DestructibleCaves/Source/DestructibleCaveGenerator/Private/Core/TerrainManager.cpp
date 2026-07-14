@@ -15,12 +15,14 @@
 #include "Materials/Material.h"
 #include "Engine/World.h"
 #include "GameFramework/Pawn.h"
+#include "UObject/UObjectGlobals.h"
 
 // Sets default values
 ATerrainManager::ATerrainManager()
 {
 	// Set this actor to call Tick() every frame.  You can turn this off to improve performance if you don't need it.
 	PrimaryActorTick.bCanEverTick = true;
+	PrimaryActorTick.bTickEvenWhenPaused = true;
 
 	// 컴포넌트 생성 및 초기화
 	ChunkManager = CreateDefaultSubobject<UChunkManager>(TEXT("ChunkManager"));
@@ -51,76 +53,61 @@ ATerrainManager::~ATerrainManager()
 void ATerrainManager::BeginPlay()
 {
 	Super::BeginPlay();
-	//AddToRoot();
+
 	TimeBudgetState.Initialize(TimeBudgetConfig);
-	if (!TerrainDataInfo.DataTable)
+
+	if (!TerrainDataInfo.DataTable || TerrainDataInfo.DataTable->GetRowStruct() != FTerrainData::StaticStruct())
 	{
-		UE_LOG(LogDCG, Error, TEXT("TerrainDataInfo.DataTable is null! Please assign a valid DataTable asset to TerrainManager. The actor will not function."));
+		UE_LOG(LogDCG, Error, TEXT("TerrainDataInfo is invalid!"));
 		bIsInitialized = false;
 		return;
 	}
 
-	if (TerrainDataInfo.DataTable->GetRowStruct() != FTerrainData::StaticStruct())
-	{
-		UE_LOG(LogDCG, Error, TEXT("TerrainDataInfo is not a TerrainData type DataTable asset! Please assign a valid DataTable asset to TerrainManager. The actor will not function."));
-		bIsInitialized = false;
-		return;
-	}
-	
-	// Load TerrainData DataTable
 	const FString ContextString(TEXT("ATerrainManager::BeginPlay"));
 	TArray<FName> RowNames = TerrainDataInfo.DataTable->GetRowNames();
+	TerrainDatas.Empty();
+
 	for (const FName& RowName : RowNames)
 	{
 		FTerrainData* RowData = TerrainDataInfo.DataTable->FindRow<FTerrainData>(RowName, ContextString);
 		if (RowData)
 		{
-			RowData->RowName = RowName; // RowName을 구조체 내부에 저장
+			RowData->RowName = RowName;
 			TerrainDatas.Add(RowData);
 		}
 	}
-	
+
 	TerrainDataCount = TerrainDatas.Num();
 
-	if (TerrainDataCount == 0)
+	if (ChunkManager)
 	{
-		UE_LOG(LogDCG, Error, TEXT("TerrainDataInfo's row data is empty! Please add data to asset. The actor will not function."));
-		bIsInitialized = false;
-		return;
+		// Clean up any editor preview ghost state
+		ChunkManager->Release();
+		ChunkManager->ActiveChunks.Empty();
+
+		if (ChunkManager->ChunkPool) ChunkManager->ChunkPool->CleanupPool();
+		ChunkManager->ChunkPool = nullptr;
+
+		SyncSettingsToChunkManager();
+		ChunkManager->Initialize(this);
+	}
+
+	if (ModifierManager)
+	{
+		ModifierManager = NewObject<UModifierManager>(this);
+		ModifierManager->Initialize(this);
+	}
+
+	if (NoiseGenerator)
+	{
+		NoiseGenerator = NewObject<UNoiseGenerator>(this);
+		NoiseGenerator->Initialize(TerrainDatas);
 	}
 
 	if (ChunkManager)
 	{
-		ChunkManager->Initialize(this);
-		ChunkManager->LoadInitialChunks(this->GetActorLocation(), NoiseGenerator);
+		ChunkManager->LoadInitialChunks(GetActorLocation(), NoiseGenerator);
 	}
-	if (ModifierManager)
-	{
-		ModifierManager->Initialize(this);
-	}
-	if (NoiseGenerator)
-	{
-		NoiseGenerator->Initialize(TerrainDatas);
-	}
-
-	
-	/*static ConstructorHelpers::FObjectFinder<UNiagaraSystem> DefaultParticleFinder(
-	TEXT("/All/Plugins/DestructibleCaveGenerator/FX_ParticleTest.FX_ParticleTest"));
-	if (DefaultParticleFinder.Succeeded())
-	{
-		DefaultDestructionParticle = DefaultParticleFinder.Object;
-	}*/
-	/*if (!RootComponent)
-	{
-		RootComponent = CreateDefaultSubobject<USceneComponent>(TEXT("RootComponent"));
-		SetRootComponent(RootComponent);
-	}*/
-	InitDestructionFX();
-	/*// MaterialTypeToParticleMap 초기화
-	for (uint8 Type = 0; Type < MaterialList.Num(); ++Type)
-	{
-		MaterialTypeToParticleMap.Add(Type, DefaultDestructionParticle);
-	}*/
 
 	bIsInitialized = true;
 }
@@ -136,51 +123,63 @@ void ATerrainManager::EndPlay(const EEndPlayReason::Type EndPlayReason)
 // Called every frame
 void ATerrainManager::Tick(float DeltaTime)
 {
-	if (!bIsInitialized)
+#if WITH_EDITOR
+	// If the cooldown timer is active, count it down
+	if (RegenerationCooldownTimer > 0.0f)
 	{
-        return;
+		RegenerationCooldownTimer -= DeltaTime;
+
+		// When it hits zero, the user has stopped editing. Safely regenerate!
+		if (RegenerationCooldownTimer <= 0.0f)
+		{
+			RegenerationCooldownTimer = 0.0f;
+			ForceEditorRegeneration();
+		}
 	}
-		
+#endif
+
+	if (!bIsInitialized)
+		return;
+
 	Super::Tick(DeltaTime);
 	TimeBudgetState.BeginFrame();
-	// 플레이어 위치 업데이트
-	if (APlayerController* PlayerController = GetWorld()->GetFirstPlayerController())
+
+	APlayerController* PlayerController = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr;
+
+	// Fix: Add a fallback for the Editor Viewport
+	if (PlayerController && PlayerController->GetPawn())
 	{
-		if (APawn* PlayerPawn = PlayerController->GetPawn())
-		{
-			ReferenceLocation = PlayerPawn->GetActorLocation();
-		}
-		const FVector CamLoc = PlayerController->PlayerCameraManager->GetCameraLocation();
-		const FVector CamForward = PlayerController->PlayerCameraManager->GetActorForwardVector();
-		//ChunkManager->ChunkScheduler->UpdateCameraInfo(CamLoc, CamForward);
-		ChunkManager->ChunkScheduler->UpdateCameraViewProjection(GetWorld());
+		ReferenceLocation = PlayerController->GetPawn()->GetActorLocation();
+	}
+	else
+	{
+		// When in the editor, center the generation around the TerrainManager actor
+		ReferenceLocation = GetActorLocation();
 	}
 
-	//미완료 파괴 처리
+	if (PlayerController && PlayerController->PlayerCameraManager)
+	{
+		const FVector CamLoc = PlayerController->PlayerCameraManager->GetCameraLocation();
+		const FVector CamForward = PlayerController->PlayerCameraManager->GetActorForwardVector();
+	}
+
+	ChunkManager->ChunkScheduler->UpdateCameraViewProjection(GetWorld());
+
 	ModifierManager->Tick(DeltaTime);
-	// 청크 재생성 처리
+
 	ProcessChunkRegeneration();
 
 	ChunkManager->ProcessChunks();
-
 	ChunkManager->UpdateChunkStreaming(ReferenceLocation, NoiseGenerator);
 
-	// 거리 기반 LOD 업데이트
+	// LOD 
 	UpdateLOD();
 
-	if (bLogTimeBudget)TimeBudgetState.LogSectionTimes();
-	if (bDrawBounds)
-	{
-		DrawDebugBounds();
-	}
-	if (bDrawDebugPoint)
-	{
-		DrawDebugPoints();
-	}
-	if (bDrawDebugGradient)
-	{
-		DrawDebugGradients();
-	}
+	if (bLogTimeBudget) TimeBudgetState.LogSectionTimes();
+	if (bDrawBounds) DrawDebugBounds();
+	if (bDrawDebugPoint) DrawDebugPoints();
+	if (bDrawDebugGradient) DrawDebugGradients();
+
 	//FlushDestructionFX();
 }
 
@@ -532,4 +531,184 @@ void ATerrainManager::TriggerDestructionFXImmediate(uint8 MaterialType, const TA
 		// Burst
 		NiagaraComp->Activate(true);
 	}
+}
+
+#if WITH_EDITOR
+void ATerrainManager::OnObjectModified(UObject* Object)
+{
+	// Start a 0.5 second cooldown. If the user keeps sliding values, this keeps resetting.
+	if (bLiveEditorPreview && TerrainDataInfo.DataTable && Object == TerrainDataInfo.DataTable)
+	{
+		RegenerationCooldownTimer = 0.5f;
+	}
+}
+
+void ATerrainManager::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
+{
+	Super::PostEditChangeProperty(PropertyChangedEvent);
+	if (!PropertyChangedEvent.Property) return;
+
+	// Start cooldown if the preview toggle is clicked, OR if a new DataTable is assigned!
+	if (bLiveEditorPreview)
+	{
+		RegenerationCooldownTimer = 0.5f;
+	}
+}
+#endif
+
+void ATerrainManager::ForceEditorRegeneration()
+{
+	if (!ChunkManager || !NoiseGenerator || !TerrainDataInfo.DataTable) return;
+
+	// 1. SAFELY wait for all background tasks to finish, and wipe old memory maps
+	// NOTE: This sets ChunkManager->ChunkScheduler to nullptr!
+	ChunkManager->Release();
+
+	// 2. Return active chunks to the pool instead of destroying them!
+	// This eliminates the massive lag spike caused by spawning new actors every time you edit a value.
+	TArray<ATerrainChunk*> ChunksToReturn;
+	ChunkManager->ActiveChunks.ForEach([&](const FIntVector& Key, ATerrainChunk* Chunk) {
+		if (Chunk) ChunksToReturn.Add(Chunk);
+		});
+	ChunkManager->ActiveChunks.Empty();
+
+	for (ATerrainChunk* Chunk : ChunksToReturn)
+	{
+		Chunk->ClearMesh();
+		if (ChunkManager->ChunkPool)
+		{
+			ChunkManager->ChunkPool->ReturnChunk(Chunk);
+		}
+	}
+
+	// 3. Clear out older cache snapshots
+	TerrainDatas.Empty();
+
+	// 4. Load DataTable rows directly
+	const FString ContextString(TEXT("ATerrainManager::ForceEditorRegeneration"));
+	TArray<FName> RowNames = TerrainDataInfo.DataTable->GetRowNames();
+
+	for (const FName& RowName : RowNames)
+	{
+		FTerrainData* RowData = TerrainDataInfo.DataTable->FindRow<FTerrainData>(RowName, ContextString);
+		if (RowData)
+		{
+			RowData->RowName = RowName;
+			TerrainDatas.Add(RowData);
+		}
+	}
+	TerrainDataCount = TerrainDatas.Num();
+
+	// 5. Push your new root settings down to the component
+	SyncSettingsToChunkManager();
+
+	// 6. Either Initialize a fresh pool (first run), or just recreate the Scheduler (reusing the pool)
+	if (!ChunkManager->ChunkPool)
+	{
+		ChunkManager->Initialize(this);
+	}
+	else
+	{
+		// Release() destroyed the scheduler, so we must recreate it to process the queue
+		ChunkManager->ChunkScheduler = NewObject<UChunkScheduler>(ChunkManager);
+		ChunkManager->ChunkScheduler->SetTerrainManger(this);
+		ChunkManager->FillDistance = ChunkManager->RenderDistance + 2;
+	}
+
+	// The plugin's internal arrays append data every time Initialize() is called. 
+	// By creating fresh objects, we stop the materials from duplicating and stacking!
+	if (ModifierManager)
+	{
+		ModifierManager = NewObject<UModifierManager>(this);
+		ModifierManager->Initialize(this);
+	}
+
+	if (NoiseGenerator)
+	{
+		NoiseGenerator = NewObject<UNoiseGenerator>(this);
+		NoiseGenerator->Initialize(TerrainDatas);
+	}
+
+	TimeBudgetState.Initialize(TimeBudgetConfig);
+
+	// 7. Cache original loading settings and use asynchronous Scheduled Tasks
+	EChunkLoadMode OriginalRuntimeMode = ChunkManager->ChunkLoadMode;
+	bool bOriginalInitLoad = ChunkManager->bInitialChunkLoad;
+
+	ChunkManager->ChunkLoadMode = EChunkLoadMode::ScheduledTask;
+	ChunkManager->bInitialChunkLoad = true;
+
+	// 8. Bake the immediate surrounding layout
+	ChunkManager->LoadInitialChunks(GetActorLocation(), NoiseGenerator);
+
+	// 9. Restore optimized structural streaming settings for game runtime
+	ChunkManager->ChunkLoadMode = OriginalRuntimeMode;
+	ChunkManager->bInitialChunkLoad = bOriginalInitLoad;
+
+	// 10. Unlock the Tick function so the async queues can process the meshes
+	bIsInitialized = true;
+}
+
+void ATerrainManager::SyncSettingsToChunkManager()
+{
+	if (ChunkManager)
+	{
+		ChunkManager->VoxelSize = VoxelSize;
+		ChunkManager->BoundsScale = BoundsScale;
+		ChunkManager->RenderDistance = RenderDistance;
+		ChunkManager->bUpdateStreaming = bUpdateStreaming;
+		ChunkManager->bInitialChunkLoad = bInitialChunkLoad;
+		ChunkManager->InitialPoolSize = InitialPoolSize;
+		ChunkManager->ChunkLoadMode = ChunkLoadMode;
+
+		// Safely cast to uint32 for the plugin's native data types
+		ChunkManager->InitialChunkLoadNum = (uint32)FMath::Max(0, InitialChunkLoadNum);
+		ChunkManager->NumThreads = (uint32)FMath::Max(0, NumThreads);
+		ChunkManager->NumMeshGeneratePerTick = (uint32)FMath::Max(0, NumMeshGeneratePerTick);
+	}
+}
+
+bool ATerrainManager::ShouldTickIfViewportsOnly() const
+{
+	// Only process background ticks in the editor if Live Preview is enabled
+	return bLiveEditorPreview;
+}
+
+void ATerrainManager::OnConstruction(const FTransform& Transform)
+{
+	Super::OnConstruction(Transform);
+
+#if WITH_EDITOR
+	if (!OnObjectModifiedHandle.IsValid())
+	{
+		OnObjectModifiedHandle = FCoreUObjectDelegates::OnObjectModified.AddUObject(this, &ATerrainManager::OnObjectModified);
+	}
+
+	if (bLiveEditorPreview && GetWorld() && !GetWorld()->IsPlayInEditor())
+	{
+		RegenerationCooldownTimer = 0.5f;
+	}
+#endif
+}
+
+void ATerrainManager::Destroyed()
+{
+#if WITH_EDITOR
+	if (OnObjectModifiedHandle.IsValid())
+	{
+		FCoreUObjectDelegates::OnObjectModified.Remove(OnObjectModifiedHandle);
+		OnObjectModifiedHandle.Reset();
+	}
+#endif
+
+	if (ChunkManager)
+	{
+		ChunkManager->Release();
+		if (ChunkManager->ChunkPool)
+		{
+			ChunkManager->ChunkPool->CleanupPool();
+		}
+	}
+
+	Super::Destroyed();
 }

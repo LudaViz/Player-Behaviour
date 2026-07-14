@@ -19,6 +19,8 @@ ATerrainChunk::ATerrainChunk()
 	ProceduralMesh = CreateDefaultSubobject<UCustomProceduralMeshComponent>(TEXT("ProceduralMesh"));
 	SetRootComponent(ProceduralMesh); // 또는 다른 RootComp에 Attach
 
+	ProceduralMesh->SetCanEverAffectNavigation(true);
+
 	// 청크 데이터와 마칭 큐브 생성기는 nullptr로 초기화
 	MarchingCubesGenerator = nullptr;
 	LODCalculator = nullptr;
@@ -48,8 +50,12 @@ void ATerrainChunk::InitializeChunk(const FIntVector& InChunkCoord,  FCaveMarchi
 	ProceduralMesh->BoundsScale=Manager->ChunkManager->BoundsScale;
 	// 최적화 옵션
 	ProceduralMesh->bUseComplexAsSimpleCollision = true;
-	ProceduralMesh->bUseAsyncCooking = true;
+	ProceduralMesh->bUseAsyncCooking = false;
 	//ProceduralMesh->SetMobility(EComponentMobility::Static); // 이건 나중에 액터 위치 변경할때 풀어야함.
+
+	ProceduralMesh->SetMobility(EComponentMobility::Static);
+	ProceduralMesh->SetCollisionObjectType(ECC_WorldStatic);
+	ProceduralMesh->SetCollisionResponseToAllChannels(ECR_Block);
 
 	InitLODCache();
 }
@@ -102,6 +108,9 @@ void ATerrainChunk::UploadMesh(/*bool bEnableWireframe*/)
 	
 	const FChunkLODLevel& MultiMeshData = GetCurrentLODMeshData();
 	FScopeLock Lock(&MeshDataLock);
+
+	// Without this, old LOD geometry stacks underneath the new geometry, causing the Z-fighting!
+	ProceduralMesh->ClearAllMeshSections();
 
 	// TODO : transition Border 메시도 업로드 
 	int32 SectionIndex = 0;
@@ -175,6 +184,19 @@ void ATerrainChunk::UploadMesh(/*bool bEnableWireframe*/)
 			SectionIndex++;
 		}
 	}
+
+	int32 NumExistingSections = ProceduralMesh->GetNumSections();
+	for (int32 i = SectionIndex; i < NumExistingSections; ++i)
+	{
+		ProceduralMesh->ClearMeshSection(i);
+	}
+
+	// This forcibly rips the mesh out of the world and drops it back in. 
+	// This updates the bounding box and forces the Dynamic NavMesh to instantly recognize the chunk.
+	ProceduralMesh->UpdateBounds();
+	ProceduralMesh->UnregisterComponent();
+	ProceduralMesh->RegisterComponent();
+
 	SetChunkState(ETerrainChunkState::Complete);
 }
 
@@ -197,22 +219,37 @@ void ATerrainChunk::UpdateLOD(int32 NewLOD, int32 NewFace)
 void ATerrainChunk::ClearMesh()
 {
 	ProceduralMesh->bUseAsyncCooking=false;
+
+	// This forces the Details Panel to drop the ghost materials (Elements 2, 3, etc.)
+	int32 NumSections = ProceduralMesh->GetNumSections();
+	for (int32 i = 0; i < NumSections; ++i)
+	{
+		ProceduralMesh->ClearMeshSection(i);
+	}
+
+	ProceduralMesh->ClearAllMeshSections();
+	ProceduralMesh->ClearCollisionConvexMeshes();
+
 	ProceduralMesh->ClearAllMeshSections();
 	ProceduralMesh->ClearCollisionConvexMeshes();
 	//ProceduralMesh->CleanUpOverrideMaterials();
-	ProceduralMesh->bUseAsyncCooking=true;
+	// 
+	// Ensure Async Cooking stays OFF so the collision bakes instantly and triggers the NavMesh
+	ProceduralMesh->bUseAsyncCooking = false;
 }
 
 
 void ATerrainChunk::ResetChunk()
 {
+	// Lock the mesh data before emptying it!
+	// If a background thread is writing to this while we lower the Render Distance, it crashes instantly.
+	FScopeLock Lock(&MeshDataLock);
 	LODMeshCache.LODLevels.Empty();
 	ClearMesh();
 	SetChunkState(ETerrainChunkState::Unloaded);
 	//PrepareTaskGeneration=0;
 	//ProceduralMesh->Activate(false);
 	SetActive(false);
-	
 }
 
 UMaterialInterface* ATerrainChunk::GetMaterial(uint8 MaterialType) const
@@ -297,6 +334,20 @@ void ATerrainChunk::UploadMeshFace()
 		);
 		SectionIndex += 2;
 	}
+
+	int32 NumExistingSections = ProceduralMesh->GetNumSections();
+	for (int32 i = SectionIndex; i < NumExistingSections; ++i)
+	{
+		ProceduralMesh->ClearMeshSection(i);
+	}
+
+	// This forcibly rips the mesh out of the world and drops it back in. 
+	// This updates the bounding box and forces the Dynamic NavMesh to instantly recognize the chunk.
+	ProceduralMesh->UpdateBounds();
+	ProceduralMesh->UnregisterComponent();
+	ProceduralMesh->RegisterComponent();
+
+	SetChunkState(ETerrainChunkState::Complete);
 }
 
 void ATerrainChunk::InitLODCache()

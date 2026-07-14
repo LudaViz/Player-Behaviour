@@ -66,12 +66,9 @@ int32 UModifierManager::DigWithSphere(const FSphere& Sphere, float Strength,TSet
 	if (!ChunkManager)
 		return 0;
 
-	/*// 1. Shape Bounds 계산
-	const FSphere Sphere(ShapeComponent->GetComponentLocation(),
-	                     Cast<USphereComponent>(ShapeComponent)
-		                     ? Cast<USphereComponent>(ShapeComponent)->GetScaledSphereRadius()
-		                     : 100.0f);*/
-	const FBox SphereBox = FBox(Sphere.Center - FVector(Sphere.W), Sphere.Center + FVector(Sphere.W));
+	// Expand the bounds by 2x the VoxelSize to ensure adjacent chunks sharing boundary voxels are updated
+	const float Padding = ChunkManager->VoxelSize * 2.0f;
+	const FBox SphereBox = FBox(Sphere.Center - FVector(Sphere.W + Padding), Sphere.Center + FVector(Sphere.W + Padding));
 	// 2. 포함되는 Coord 계산, 나중에 별도 함수로 분리
 
 

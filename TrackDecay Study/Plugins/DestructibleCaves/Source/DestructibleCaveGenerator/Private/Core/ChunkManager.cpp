@@ -806,8 +806,10 @@ void UChunkManager::ShutdownAsyncTasks()
 			}
 		}
 	}
+
 	PendingChunkFillTasks.Empty();
 	FillingChunks.Empty();
+	ChunksToFill.Empty();
 
 	// 'Prepare Mesh' Task 정리
 	if (!PrepareMeshTasks.IsEmpty())

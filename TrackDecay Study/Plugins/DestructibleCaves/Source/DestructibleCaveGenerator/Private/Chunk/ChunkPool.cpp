@@ -47,8 +47,7 @@ void UChunkPool::RequestResize(int32 NewSize)
 
 void UChunkPool::TickResize()
 {
-    if (ResizeState == EChunkPoolResizeState::None)
-        return;
+    if (ResizeState == EChunkPoolResizeState::None) return;
 
     const int32 Diff = TargetPoolSize - CurrentPoolSize;
     const int32 Step = FMath::Min(FMath::Abs(Diff), StepPerTick);
@@ -67,62 +66,63 @@ void UChunkPool::TickResize()
         {
             if (ReturnedChunks.Num() > 0)
             {
-                //ATerrainChunk* ChunkToDestroy = ReturnedChunks.Pop();
-                auto It = ReturnedChunks.CreateIterator(); // unordered
+                auto It = ReturnedChunks.CreateIterator();
                 ATerrainChunk* ChunkToDestroy = *It;
-                ReturnedChunks.Remove(ChunkToDestroy); // 또는 Remove(Chunk)
-                
-                ChunkToDestroy->DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
-                ChunkToDestroy->Destroy();
+                ReturnedChunks.Remove(ChunkToDestroy);
+
+                // Safely destroy only if it exists
+                if (IsValid(ChunkToDestroy))
+                {
+                    ChunkToDestroy->DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
+                    ChunkToDestroy->Destroy();
+                }
                 --CurrentPoolSize;
             }
         }
     }
 
-    if (CurrentPoolSize == TargetPoolSize)
-    {
-        ResizeState = EChunkPoolResizeState::None;
-    }
-
-    //UE_LOG(LogDCG, Warning, TEXT("Resized to %d"), CurrentPoolSize)
+    if (CurrentPoolSize == TargetPoolSize) ResizeState = EChunkPoolResizeState::None;
 }
 
 ATerrainChunk* UChunkPool::RentChunk()
 {
-    //TRACE_CPUPROFILER_EVENT_SCOPE_STR("UChunkPool::RentChunk")
-    if (ReturnedChunks.Num() == 0)
+    ATerrainChunk* Chunk = nullptr;
+
+    while (ReturnedChunks.Num() > 0)
     {
-        // Ensure we always return a chunk: double the pool size and begin expansion
+        auto It = ReturnedChunks.CreateIterator();
+        Chunk = *It;
+        ReturnedChunks.Remove(Chunk);
+
+        if (IsValid(Chunk))
+        {
+            break; // Found a valid chunk!
+        }
+        else
+        {
+            Chunk = nullptr; // It was a deleted ghost pointer
+            CurrentPoolSize--;
+        }
+    }
+
+    if (!Chunk)
+    {
         int32 NewTargetSize = FMath::Clamp(FMath::RoundUpToPowerOfTwo(CurrentPoolSize * 2), MinPoolSize, MaxPoolSize);
         if (NewTargetSize > CurrentPoolSize)
         {
             RequestResize(NewTargetSize);
         }
 
-        // Create one chunk immediately for return
-        ATerrainChunk* NewChunk = CreateNewChunk();
-        if (NewChunk)
-        {
-            NewChunk->ResetChunk();
-            ++CurrentPoolSize;
-            RentedChunks.Add(NewChunk);
-            NewChunk->SetChunkState(ETerrainChunkState::Idle);
-        }
-        else
-        {
-            UE_LOG(LogDCG, Error, TEXT("Failed to create chunk during RentChunk"));
-        }
-        return NewChunk;
+        Chunk = CreateNewChunk();
+        if (Chunk) ++CurrentPoolSize;
     }
 
-    //ATerrainChunk* Chunk = ReturnedChunks.Pop();
-    auto It = ReturnedChunks.CreateIterator(); // unordered
-    ATerrainChunk* Chunk = *It;
-    ReturnedChunks.Remove(Chunk); // 또는 Remove(Chunk)
-    
-    Chunk->ResetChunk();
-    RentedChunks.Add(Chunk);
-    Chunk->SetChunkState(ETerrainChunkState::Idle);
+    if (Chunk)
+    {
+        Chunk->ResetChunk();
+        RentedChunks.Add(Chunk);
+        Chunk->SetChunkState(ETerrainChunkState::Idle);
+    }
     return Chunk;
 }
 
@@ -149,7 +149,7 @@ void UChunkPool::CleanupPool()
 {
     for (ATerrainChunk* Chunk : ReturnedChunks)
     {
-        if (Chunk && !Chunk->IsPendingKillPending())
+        if (IsValid(Chunk))
         {
             Chunk->DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
             Chunk->Destroy();
@@ -159,7 +159,7 @@ void UChunkPool::CleanupPool()
 
     for (ATerrainChunk* Chunk : RentedChunks)
     {
-        if (Chunk && !Chunk->IsPendingKillPending())
+        if (IsValid(Chunk))
         {
             Chunk->DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
             Chunk->Destroy();
@@ -175,18 +175,15 @@ void UChunkPool::CleanupPool()
 
 ATerrainChunk* UChunkPool::CreateNewChunk() const
 {
-    /*UWorld* World = GEngine ? GEngine->GetWorldFromContextObjectChecked(this) : nullptr;
-    if (!World || !*ChunkClass)
-        return nullptr;
-        */
-    UWorld* World = GetWorld(); // 더 안전하고 보편적
-    if (!World || !*ChunkClass)
-    {
-        UE_LOG(LogDCG, Error, TEXT("UChunkPool::CreateNewChunk: Invalid World or ChunkClass"));
-        return nullptr;
-    }
+    UWorld* World = GetWorld();
+    if (!World || !*ChunkClass) return nullptr;
+
     FActorSpawnParameters SpawnParams;
     SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+    SpawnParams.bHideFromSceneOutliner = true;
+
+    // RF_DuplicateTransient prevents the chunks from duplicating and lagging out when pressing "Play"
+    SpawnParams.ObjectFlags |= (RF_Transient | RF_DuplicateTransient);
 
     return World->SpawnActor<ATerrainChunk>(ChunkClass, FVector::ZeroVector, FRotator::ZeroRotator, SpawnParams);
 }
