@@ -79,34 +79,45 @@ void ATerrainManager::BeginPlay()
 
 	TerrainDataCount = TerrainDatas.Num();
 
-	if (ChunkManager)
+	// Check if Unreal's PIE already copied our preview chunks into the game world
+	bool bAlreadyGenerated = (ChunkManager && ChunkManager->ActiveChunks.Num() > 0);
+
+	if (!bAlreadyGenerated)
 	{
-		// Clean up any editor preview ghost state
-		ChunkManager->Release();
-		ChunkManager->ActiveChunks.Empty();
+		// --- FRESH GENERATION (Standalone Game, Packaged Build, or Live Preview was OFF) ---
+		if (ChunkManager)
+		{
+			ChunkManager->Release();
+			ChunkManager->ActiveChunks.Empty();
+			if (ChunkManager->ChunkPool) ChunkManager->ChunkPool->CleanupPool();
+			ChunkManager->ChunkPool = nullptr;
 
-		if (ChunkManager->ChunkPool) ChunkManager->ChunkPool->CleanupPool();
-		ChunkManager->ChunkPool = nullptr;
+			SyncSettingsToChunkManager();
+			ChunkManager->Initialize(this);
+		}
 
-		SyncSettingsToChunkManager();
-		ChunkManager->Initialize(this);
+		if (ModifierManager)
+		{
+			ModifierManager = NewObject<UModifierManager>(this);
+			ModifierManager->Initialize(this);
+		}
+
+		if (NoiseGenerator)
+		{
+			NoiseGenerator = NewObject<UNoiseGenerator>(this);
+			NoiseGenerator->Initialize(TerrainDatas);
+		}
+
+		if (ChunkManager) ChunkManager->LoadInitialChunks(GetActorLocation(), NoiseGenerator);
 	}
-
-	if (ModifierManager)
+	else
 	{
-		ModifierManager = NewObject<UModifierManager>(this);
-		ModifierManager->Initialize(this);
-	}
-
-	if (NoiseGenerator)
-	{
-		NoiseGenerator = NewObject<UNoiseGenerator>(this);
-		NoiseGenerator->Initialize(TerrainDatas);
-	}
-
-	if (ChunkManager)
-	{
-		ChunkManager->LoadInitialChunks(GetActorLocation(), NoiseGenerator);
+		// --- PIE SEAMLESS TAKEOVER ---
+		// The editor preview was duplicated! Just reconnect the scheduler pointers.
+		if (ChunkManager && ChunkManager->ChunkScheduler)
+		{
+			ChunkManager->ChunkScheduler->SetTerrainManger(this);
+		}
 	}
 
 	bIsInitialized = true;

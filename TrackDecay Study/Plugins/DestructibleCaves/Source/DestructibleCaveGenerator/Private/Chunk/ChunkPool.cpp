@@ -183,7 +183,7 @@ ATerrainChunk* UChunkPool::CreateNewChunk() const
     SpawnParams.bHideFromSceneOutliner = true;
 
     // RF_DuplicateTransient prevents the chunks from duplicating and lagging out when pressing "Play"
-    SpawnParams.ObjectFlags |= (RF_Transient | RF_DuplicateTransient);
+    SpawnParams.ObjectFlags |= RF_Transient;
 
     return World->SpawnActor<ATerrainChunk>(ChunkClass, FVector::ZeroVector, FRotator::ZeroRotator, SpawnParams);
 }
