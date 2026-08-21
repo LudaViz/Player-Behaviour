@@ -31,13 +31,21 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        
       - name: Setup Pages
         uses: actions/configure-pages@v5
+        
+      # 1. NEW: Explicitly fix permissions before uploading
+      - name: Fix permissions
+        run: chmod -R +rX './Post-Mortem Workshop'
+        
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+        # 2. UPDATED: Bumped to v5 to match your other v5 actions
+        uses: actions/upload-pages-artifact@v5
         with:
-          # Upload entire repository
+          # 3. WARNING: Consider removing the space in this folder name in your repository
           path: './Post-Mortem Workshop'
+          
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5
