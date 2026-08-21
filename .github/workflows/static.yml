@@ -2,27 +2,20 @@
 name: Deploy static content to Pages
 
 on:
-  # Runs on pushes targeting the default branch
   push:
     branches: ["main"]
-
-  # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
 
-# Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
 permissions:
   contents: read
   pages: write
   id-token: write
 
-# Allow only one concurrent deployment, skipping runs queued between the run in-progress and latest queued.
-# However, do NOT cancel in-progress runs as we want to allow these production deployments to complete.
 concurrency:
   group: "pages"
   cancel-in-progress: false
 
 jobs:
-  # Single deploy job since we're just deploying
   deploy:
     environment:
       name: github-pages
@@ -31,21 +24,26 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        
+
       - name: Setup Pages
         uses: actions/configure-pages@v5
-        
-      # 1. NEW: Explicitly fix permissions before uploading
+
+      # NEW STEP: Create a staging folder and copy ONLY the workshop into it
+      - name: Prepare Deployment Folder
+        run: |
+          mkdir _pages
+          cp -r "./Post-Mortem Workshop" ./_pages/
+
+      # NEW STEP: Fix permissions to prevent 403/404 errors during upload
       - name: Fix permissions
-        run: chmod -R +rX './Post-Mortem Workshop'
-        
+        run: chmod -R +rX ./_pages
+
       - name: Upload artifact
-        # 2. UPDATED: Bumped to v5 to match your other v5 actions
-        uses: actions/upload-pages-artifact@v5
+        uses: actions/upload-pages-artifact@v3
         with:
-          # 3. WARNING: Consider removing the space in this folder name in your repository
-          path: './Post-Mortem Workshop'
-          
+          # Upload the staging folder, NOT the root repository
+          path: './_pages'
+
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v5
+        uses: actions/deploy-pages@v4
